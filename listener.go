@@ -22,9 +22,8 @@ const (
 // gracefully closing the listener.
 type listener struct {
 	net.Listener
-	tlsConfig *tls.Config
-	unblock   chan interface{}
-	signal    chan int
+	tlsConfig       *tls.Config
+	unblock, signal chan int
 }
 
 // newListener creates a new listener.
@@ -33,7 +32,7 @@ func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
 
 	l := &listener{
 		tlsConfig: tlsConfig,
-		unblock:   make(chan interface{}),
+		unblock:   make(chan int),
 		signal:    make(chan int, 1),
 	}
 	l.Listener, err = net.Listen("tcp", addr)
@@ -64,7 +63,7 @@ func (l *listener) Accept() (c net.Conn, err error) {
 
 // close closes the listener.
 func (l *listener) close() {
-	l.Listener.Close()
+	l.Close()
 	activeListeners.unwatch(l)
 }
 
@@ -132,15 +131,20 @@ func (l *listeners) unwatch(w *listener) {
 // connections are allowed to finish.  Otherwise, listeners are closed without
 // regard to any active connections.
 func (l *listeners) shutdown(graceful bool) {
-	l.RLock()
-	for _, li := range l.listeners {
+	l.Lock()
+	for i, li := range l.listeners {
 		li.signal <- signalShutdown
+		li.unblock <- signalShutdown
 		if !graceful {
 			li.Close()
+			l.listeners[i] = nil
+			l.Done()
 		}
-		li.unblock <- signalShutdown
 	}
-	l.RUnlock()
+	if !graceful {
+		l.listeners = nil
+	}
+	l.Unlock()
 	if graceful {
 		l.Wait()
 	}

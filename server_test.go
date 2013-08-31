@@ -41,9 +41,14 @@ var (
 	longRunningRoute = "/long"
 )
 
+func init() {
+	ServeMux.HandleFunc(simpleRoute, simpleHandler)
+	ServeMux.HandleFunc(longRunningRoute, longRunningHandler)
+}
+
 func TestBasicOperation(t *testing.T) {
-	if err := startServer(); err != nil {
-		t.Fatal(err)
+	if err := ListenAndServeTLS(addrs, serverName, certFile, keyFile); err != nil {
+		t.Fatalf("Failed to start server: '%v'.", err)
 	}
 	defer Shutdown()
 
@@ -56,7 +61,7 @@ func TestBasicOperation(t *testing.T) {
 
 	Shutdown()
 
-	// Ensure that the server stopped.
+	// Ensure that the server shut down.
 	for _, addr := range addrs {
 		if err := makeRequest(addr, simpleRoute, false); err != nil {
 			t.Errorf("Server shutdown failed: '%v'.", err)
@@ -67,16 +72,6 @@ func TestBasicOperation(t *testing.T) {
 func TestGracefulShutdown(t *testing.T) {
 	// FIXME: I can very easily manually test this, but I can't for the life
 	// of me find a way to successfully test it here.
-}
-
-func startServer() error {
-	if err := ListenAndServe(addrs, serverName, certFile, keyFile); err != nil {
-		return fmt.Errorf("Failed to start server: '%v'.", err)
-	}
-	ServeMux.HandleFunc(simpleRoute, simpleHandler)
-	ServeMux.HandleFunc(longRunningRoute, longRunningHandler)
-
-	return nil
 }
 
 func makeRequest(addr string, route string, expectSuccess bool) error {

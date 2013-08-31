@@ -6,7 +6,7 @@ An easy to use HTTPS server written in Go.  It uses the standard library, and pr
 Usage is simple:
 
 ```
-if err := server.ListenAndServe("127.0.0.1:443", "localhost", "./cert.file", "./key.file"); if err != nil {
+if err := server.ListenAndServeTLS("127.0.0.1:443", "localhost", "./cert.file", "./key.file"); if err != nil {
 	log.Fatal("Error starting server:", err)
 }
 // Do stuff

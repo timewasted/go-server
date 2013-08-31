@@ -7,9 +7,6 @@ package server
 
 import (
 	"crypto/tls"
-	"fmt"
-	"net"
-	"net/http"
 )
 
 // A list of the possible cipher suite ids that are not already defined
@@ -24,12 +21,30 @@ const (
 	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 uint16 = 0xc030
 )
 
-// ListenAndServe spawns new listeners, and serves connections from those listeners.
-func ListenAndServe(addrs []string, serverName string, certFile string, keyFile string) error {
-	var err error
+// ListenAndServeTLS listens on the given addresses and serves the incoming TLS
+// connections.
+func ListenAndServeTLS(addrs []string, serverName string, certFile string, keyFile string) error {
+	tlsConfig, err := configureTLS(serverName, certFile, keyFile)
+	if err != nil {
+		return err
+	}
 
-	// Do basic TLS configuration.
-	tlsConfig := &tls.Config{
+	for _, addr := range addrs {
+		li, err := newListener(addr, tlsConfig)
+		if err != nil {
+			// FIXME: We should probably continue iterating through the addresses.
+			return err
+		}
+		go li.serve()
+	}
+
+	return err
+}
+
+// configureTLS returns a TLS configuration that will be used by listeners.
+func configureTLS(serverName string, certFile string, keyFile string) (*tls.Config, error) {
+	// Basic TLS configuration.
+	config := &tls.Config{
 		NextProtos: []string{"http/1.1"},
 		ServerName: serverName,
 		CipherSuites: []uint16{
@@ -45,55 +60,14 @@ func ListenAndServe(addrs []string, serverName string, certFile string, keyFile 
 	}
 
 	// Load the server's certificate.
-	tlsConfig.Certificates = make([]tls.Certificate, 1)
-	tlsConfig.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+	var err error
+	config.Certificates = make([]tls.Certificate, 1)
+	config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	for _, addr := range addrs {
-		// Listen for new connections.
-		l := &listener{
-			tlsConfig: tlsConfig,
-			shutdown:  make(chan interface{}),
-		}
-		l.Listener, err = net.Listen("tcp", addr)
-		if err != nil {
-			// FIXME: We should probably continue iterating through the addresses.
-			return err
-		}
-		activeListeners.watch(l)
-		tlsListener := tls.NewListener(l, l.tlsConfig)
-
-		// Serve the connections.
-		go serve(l, tlsListener)
-
-		// Since http.Serve() blocks indefinitely on Accept() with no way to
-		// signal it to stop blocking, we have to resort to Dial()ing the
-		// listener to force it to check to see if it should shut down.
-		// FIXME: This is a hack.  There has to be a better way to do this,
-		// short of reimplementing http.Serve().
-		go func(l *listener) {
-			<-l.shutdown
-			if c, err := tls.Dial("tcp", l.Addr().String(), l.tlsConfig); err == nil {
-				c.Close()
-			}
-		}(l)
-	}
-
-	return err
-}
-
-// serve handles serving connections, and cleaning up listeners that fail.
-func serve(l *listener, tlsListener net.Listener) {
-	defer activeListeners.unwatch(l)
-
-	if err := http.Serve(tlsListener, ServeMux); err != nil {
-		if _, requested := err.(*shutdownRequestedError); !requested {
-			// FIXME: Implement restarting of listeners that failed.
-			panic(fmt.Errorf("Failed to serve connection: %v", err))
-		}
-	}
+	return config, nil
 }
 
 // Shutdown gracefully closes all currently active listeners.

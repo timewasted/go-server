@@ -7,8 +7,15 @@ package server
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"sync"
+)
+
+// Signals that can be sent to listeners.
+const (
+	signalShutdown = iota
 )
 
 // listener is an implementation of the net.Listener interface that supports
@@ -16,13 +23,84 @@ import (
 type listener struct {
 	net.Listener
 	tlsConfig *tls.Config
-	shutdown  chan interface{}
+	unblock   chan interface{}
+	signal    chan int
+}
+
+// newListener creates a new listener.
+func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
+	var err error
+
+	l := &listener{
+		tlsConfig: tlsConfig,
+		unblock:   make(chan interface{}),
+		signal:    make(chan int, 1),
+	}
+	l.Listener, err = net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	activeListeners.watch(l)
+
+	return l, nil
+}
+
+// Accept implements the Accept() method of the net.Listener interface.
+func (l *listener) Accept() (c net.Conn, err error) {
+	// Check for signals.
+	select {
+	case sig := <-l.signal:
+		switch sig {
+		case signalShutdown:
+			l.close()
+			return nil, errShutdownRequested
+		}
+	default:
+	}
+
+	c, err = l.Listener.Accept()
+	return
+}
+
+// close closes the listener.
+func (l *listener) close() {
+	l.Listener.Close()
+	activeListeners.unwatch(l)
+}
+
+// serve handles serving connections, and cleaning up listeners that fail.
+func (l *listener) serve() {
+	defer l.close()
+
+	go l.unblockAccept()
+	tlsListener := tls.NewListener(l, l.tlsConfig)
+	if err := http.Serve(tlsListener, ServeMux); err != nil {
+		if _, requested := err.(*shutdownRequestedError); !requested {
+			// FIXME: Implement restarting of listeners that failed.
+			panic(fmt.Errorf("Failed to serve connection: %v", err))
+		}
+	}
+}
+
+// unblockAccept will, upon receiving a signal, connect to the listener then
+// immediately disconnect from it, in order to unblock Accept().
+// FIXME: This is a hack.  It works, but there has to be a better way.
+func (l *listener) unblockAccept() {
+	for {
+		sig := <-l.unblock
+		if c, err := tls.Dial("tcp", l.Addr().String(), l.tlsConfig); err == nil {
+			c.Close()
+		}
+		if sig == signalShutdown {
+			return
+		}
+	}
 }
 
 // listeners is a container that keeps track of listener.
 type listeners struct {
 	listeners []*listener
-	sync.Mutex
+	sync.RWMutex
 	sync.WaitGroup
 }
 
@@ -54,15 +132,15 @@ func (l *listeners) unwatch(w *listener) {
 // connections are allowed to finish.  Otherwise, listeners are closed without
 // regard to any active connections.
 func (l *listeners) shutdown(graceful bool) {
-	l.Lock()
+	l.RLock()
 	for _, li := range l.listeners {
-		if graceful {
-			close(li.shutdown)
-		} else {
+		li.signal <- signalShutdown
+		if !graceful {
 			li.Close()
 		}
+		li.unblock <- signalShutdown
 	}
-	l.Unlock()
+	l.RUnlock()
 	if graceful {
 		l.Wait()
 	}
@@ -79,19 +157,3 @@ type shutdownRequestedError struct {
 
 // errShutdownRequested is an instance of shutdownRequestedError.
 var errShutdownRequested = &shutdownRequestedError{errors.New("shutdown requested")}
-
-// Accept implements the Accept() method of the net.Listener interface.
-func (l *listener) Accept() (c net.Conn, err error) {
-	// Check to see if we should shut down.
-	select {
-	case <-l.shutdown:
-		// l.Close() isn't really needed here, since http.Serve() closes the
-		// listener on return.
-		l.Close()
-		return nil, errShutdownRequested
-	default:
-	}
-
-	c, err = l.Listener.Accept()
-	return
-}

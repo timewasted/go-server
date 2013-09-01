@@ -93,7 +93,8 @@ func (l *listener) serve() {
 	tlsListener := tls.NewListener(l, l.tlsConfig)
 	if err := http.Serve(tlsListener, ServeMux); err != nil {
 		if _, requested := err.(*shutdownRequestedError); !requested {
-			// FIXME: Implement restarting of listeners that failed.
+			// FIXME: Either implement restarting of listeners that failed, or
+			// do some better error handling.
 			panic(fmt.Errorf("Failed to serve connection: %v", err))
 		}
 	}
@@ -210,7 +211,7 @@ type detachedListener struct {
 	sessionTicketKey [32]byte
 }
 
-// DetachedListeners is an address to detachedListener mapping.
+// DetachedListeners is an address => detachedListener mapping.
 type DetachedListeners map[string]detachedListener
 
 // shutdownRequested is an error type used to indicate that the shutdown of a

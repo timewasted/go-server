@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package server provides an easy to use HTTPS server.
+// Package server provides an easy to use HTTPS server.  It provides some
+// benefits over using the standard library directly, such as the ability to
+// gracefully shut down active connections, and to do low (zero?) downtime
+// restarts.
 package server
 
 import (
@@ -13,6 +16,7 @@ import (
 // A list of the possible cipher suite ids that are not already defined
 // by the crypto/tls package. Taken from
 // http://www.iana.org/assignments/tls-parameters/tls-parameters.xml
+//
 // Note that the reason they are not defined by the crypto/tls package is
 // because they are only usable in TLS 1.2, which is not yet supported by Go.
 const (
@@ -37,8 +41,8 @@ func HTTPS(addrs []string, serverName string, certFile string, keyFile string, e
 	}
 
 	for _, addr := range addrs {
-		// Configure TLS for each individual address to avoid each one sharing
-		// a SessionTicketKey.
+		// Configure TLS for each individual address to avoid all addresses
+		// sharing the same SessionTicketKey.
 		tlsConfig := &tls.Config{
 			Certificates: tlsCertificates,
 			NextProtos:   []string{"http/1.1"},

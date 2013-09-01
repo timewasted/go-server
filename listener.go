@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
+	"syscall"
 )
 
 // Signals that can be sent to listeners.
@@ -28,16 +30,32 @@ type listener struct {
 
 // newListener creates a new listener.
 func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
-	var err error
-
+	li, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	l := &listener{
+		Listener:  li,
 		tlsConfig: tlsConfig,
 		unblock:   make(chan int),
 		signal:    make(chan int, 1),
 	}
-	l.Listener, err = net.Listen("tcp", addr)
+	activeListeners.watch(l)
+
+	return l, nil
+}
+
+// newListenerFromFd creates a new listener using the provided file descriptor.
+func newListenerFromFd(fd uintptr, addr string, tlsConfig *tls.Config) (*listener, error) {
+	li, err := net.FileListener(os.NewFile(fd, "tcp:"+addr+"->"))
 	if err != nil {
 		return nil, err
+	}
+	l := &listener{
+		Listener:  li.(*net.TCPListener),
+		tlsConfig: tlsConfig,
+		unblock:   make(chan int),
+		signal:    make(chan int, 1),
 	}
 	activeListeners.watch(l)
 
@@ -150,8 +168,57 @@ func (l *listeners) shutdown(graceful bool) {
 	}
 }
 
+// detach closes all active listeners, while keeping the underlying file
+// descriptor open so that the listener can be recreated later.
+// FIXME: This needs much better error handling.
+func (l *listeners) detach() (DetachedListeners, error) {
+	var err error
+	var file *os.File
+	var fd int
+
+	l.RLock()
+	detachedListeners := make(DetachedListeners)
+	for _, li := range l.listeners {
+		// Get the listener's underlying file.
+		file, err = li.Listener.(*net.TCPListener).File()
+		if err != nil {
+			break
+		}
+
+		// Get the file descriptor of the file.
+		fd, err = syscall.Dup(int(file.Fd()))
+		if err != nil {
+			break
+		}
+
+		detachedListeners[li.Addr().String()] = detachedListener{
+			Fd:               uintptr(fd),
+			sessionTicketKey: li.tlsConfig.SessionTicketKey,
+		}
+		li.signal <- signalShutdown
+		li.unblock <- signalShutdown
+	}
+	l.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+
+	l.Wait()
+	return detachedListeners, nil
+}
+
 // activeListeners is a collection of the currently active listeners.
 var activeListeners = &listeners{}
+
+// detachedListener holds the information needed to detach and then recreate
+// a listener.
+type detachedListener struct {
+	Fd               uintptr
+	sessionTicketKey [32]byte
+}
+
+// DetachedListeners is an address to detachedListener mapping.
+type DetachedListeners map[string]detachedListener
 
 // shutdownRequested is an error type used to indicate that the shutdown of a
 // listener was requested.

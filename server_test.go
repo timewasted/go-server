@@ -47,24 +47,34 @@ func init() {
 }
 
 func TestBasicOperation(t *testing.T) {
-	if err := ListenAndServeTLS(addrs, serverName, certFile, keyFile); err != nil {
-		t.Fatalf("Failed to start server: '%v'.", err)
+	if err := HTTPS(addrs, serverName, certFile, keyFile, nil); err != nil {
+		t.Fatalf("Expected no error starting server, received '%v'.", err)
 	}
 	defer Shutdown()
 
-	// Ensure that the server started.
+	// Requests to a running server should succeed.
 	for _, addr := range addrs {
 		if err := makeRequest(addr, simpleRoute, true); err != nil {
-			t.Fatalf("Server startup failed: '%v'.", err)
+			t.Fatalf("Request failed: '%v'.", err)
 		}
+	}
+
+	// Each listener should have a unique TLS session ticket key.
+	if activeListeners.listeners[0].tlsConfig.SessionTicketKey == activeListeners.listeners[1].tlsConfig.SessionTicketKey {
+		t.Error("Expected session ticket keys to not match.")
 	}
 
 	Shutdown()
 
-	// Ensure that the server shut down.
+	// There should be not active listeners after shutting down.
+	if len(activeListeners.listeners) != 0 {
+		t.Errorf("Expected no active listeners, received '%v'.", len(activeListeners.listeners))
+	}
+
+	// Requests to a non-running server should fail.
 	for _, addr := range addrs {
 		if err := makeRequest(addr, simpleRoute, false); err != nil {
-			t.Errorf("Server shutdown failed: '%v'.", err)
+			t.Errorf("Request failed: '%v'.", err)
 		}
 	}
 }
@@ -74,18 +84,71 @@ func TestGracefulShutdown(t *testing.T) {
 	// of me find a way to successfully test it here.
 }
 
+func TestReuseListeners(t *testing.T) {
+	if err := HTTPS(addrs, serverName, certFile, keyFile, nil); err != nil {
+		t.Fatalf("Expected no error starting server, received '%v'.", err)
+	}
+	defer Shutdown()
+
+	// Requests to a running server should succeed.
+	for _, addr := range addrs {
+		if err := makeRequest(addr, simpleRoute, true); err != nil {
+			t.Fatalf("Request failed: '%v'.", err)
+		}
+	}
+
+	// Store the current TLS session ticket keys.
+	tlsSessionTicketKeys := make(map[string][32]byte)
+	for _, li := range activeListeners.listeners {
+		tlsSessionTicketKeys[li.Addr().String()] = li.tlsConfig.SessionTicketKey
+	}
+
+	existingListeners, err := Detach()
+	if err != nil {
+		t.Fatalf("Expected no error detaching listeners, received '%v'.", err)
+	}
+
+	// There should be not active listeners after detaching.
+	if len(activeListeners.listeners) != 0 {
+		t.Errorf("Expected no active listeners, received '%v'.", len(activeListeners.listeners))
+	}
+
+	// The server should reuse the existing listeners.
+	if err := HTTPS(addrs, serverName, certFile, keyFile, existingListeners); err != nil {
+		t.Fatalf("Expected no error starting server, received '%v'.", err)
+	}
+
+	// Requests to a running server should succeed.
+	for _, addr := range addrs {
+		if err := makeRequest(addr, simpleRoute, true); err != nil {
+			t.Fatalf("Request failed: '%v'.", err)
+		}
+	}
+
+	// Verify that the TLS session ticket keys haven't changed.
+	for _, li := range activeListeners.listeners {
+		expectedKey, exists := tlsSessionTicketKeys[li.Addr().String()]
+		if !exists {
+			t.Errorf("Expected a session ticket key for %v to exist.", li.Addr().String())
+		} else if expectedKey != li.tlsConfig.SessionTicketKey {
+			t.Errorf("Expected session ticket keys for %v to match.", li.Addr().String())
+		}
+	}
+}
+
 func makeRequest(addr string, route string, expectSuccess bool) error {
-	resp, err := httpClient.Get("https://" + addr + route)
+	url := "https://" + addr + route
+	resp, err := httpClient.Get(url)
 	if expectSuccess {
 		if err != nil {
-			return fmt.Errorf("Failed to connect to https://%v%v: '%v'.", addr, route, err)
+			return fmt.Errorf("Expected no error connecting to %v, received '%v'.", url, err)
 		}
 		if resp.StatusCode != 200 {
-			return fmt.Errorf("Expected response code 200 from https://%v%v, received '%v'.", addr, route, resp.StatusCode)
+			return fmt.Errorf("Expected response code 200 from %v, received '%v'.", url, resp.StatusCode)
 		}
 	} else {
 		if err == nil {
-			return fmt.Errorf("Successfully connected to https://%v%v while expecting failure.", addr, route)
+			return fmt.Errorf("Expected failure connecting to %v.", url)
 		}
 	}
 	return nil

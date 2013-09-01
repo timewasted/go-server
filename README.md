@@ -1,12 +1,15 @@
 go-server
 =========
 
-An easy to use HTTPS server written in Go.  It uses the standard library, and provides some benefits over using the standard library directly.  Perhaps the largest benefit is the ability to actually gracefully shut down active connections.
+An easy to use HTTPS server written in Go.  It uses the standard library, and provides some benefits over using the standard library directly:
+
+* Can gracefully shut down active connections.
+* Can detach and reattach listeners, which allows for low (zero?) downtime restarts.
 
 Usage is simple:
 
 ```
-if err := server.ListenAndServeTLS("127.0.0.1:443", "localhost", "./cert.file", "./key.file"); if err != nil {
+if err := server.HTTPS("127.0.0.1:443", "localhost", "./cert.file", "./key.file", nil); if err != nil {
 	log.Fatal("Error starting server:", err)
 }
 // Do stuff

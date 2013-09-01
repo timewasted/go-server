@@ -170,25 +170,23 @@ func (l *listeners) shutdown(graceful bool) {
 
 // detach closes all active listeners, while keeping the underlying file
 // descriptor open so that the listener can be recreated later.
-// FIXME: This needs much better error handling.
+// FIXME: This could use some better error handling.
 func (l *listeners) detach() (DetachedListeners, error) {
-	var err error
-	var file *os.File
-	var fd int
-
 	l.RLock()
+	defer l.RUnlock()
+
 	detachedListeners := make(DetachedListeners)
 	for _, li := range l.listeners {
 		// Get the listener's underlying file.
-		file, err = li.Listener.(*net.TCPListener).File()
+		file, err := li.Listener.(*net.TCPListener).File()
 		if err != nil {
-			break
+			return nil, err
 		}
 
 		// Get the file descriptor of the file.
-		fd, err = syscall.Dup(int(file.Fd()))
+		fd, err := syscall.Dup(int(file.Fd()))
 		if err != nil {
-			break
+			return nil, err
 		}
 
 		detachedListeners[li.Addr().String()] = detachedListener{
@@ -198,12 +196,7 @@ func (l *listeners) detach() (DetachedListeners, error) {
 		li.signal <- signalShutdown
 		li.unblock <- signalShutdown
 	}
-	l.RUnlock()
-	if err != nil {
-		return nil, err
-	}
 
-	l.Wait()
 	return detachedListeners, nil
 }
 

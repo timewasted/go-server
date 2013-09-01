@@ -108,11 +108,6 @@ func TestReuseListeners(t *testing.T) {
 		t.Fatalf("Expected no error detaching listeners, received '%v'.", err)
 	}
 
-	// There should be not active listeners after detaching.
-	if len(activeListeners.listeners) != 0 {
-		t.Errorf("Expected no active listeners, received '%v'.", len(activeListeners.listeners))
-	}
-
 	// The server should reuse the existing listeners.
 	if err := HTTPS(addrs, serverName, certFile, keyFile, existingListeners); err != nil {
 		t.Fatalf("Expected no error starting server, received '%v'.", err)

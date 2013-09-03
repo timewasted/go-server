@@ -6,26 +6,28 @@ package server
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"sync"
-	"syscall"
+	"time"
 )
 
-// Signals that can be sent to listeners.
+// States that a listener can be in.
 const (
-	signalShutdown = iota
+	stateActive   uint16 = iota
+	stateClosing  uint16 = 1 << iota
+	stateDetached uint16 = 1 << iota
 )
 
-// listener is an implementation of the net.Listener interface that supports
-// gracefully closing the listener.
+// listener is an implementation of the net.Listener interface.
 type listener struct {
 	net.Listener
-	tlsConfig       *tls.Config
-	unblock, signal chan int
+	file      *os.File
+	tlsConfig *tls.Config
+	shutdown  chan interface{}
+	state     uint16
 }
 
 // newListener creates a new listener.
@@ -34,108 +36,123 @@ func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	file, err := li.(*net.TCPListener).File()
+	if err != nil {
+		li.Close()
+		return nil, err
+	}
 	l := &listener{
 		Listener:  li,
+		file:      file,
 		tlsConfig: tlsConfig,
-		unblock:   make(chan int),
-		signal:    make(chan int, 1),
+		shutdown:  make(chan interface{}),
+		state:     stateActive,
 	}
-	activeListeners.watch(l)
+	managedListeners.manage(l)
 
 	return l, nil
 }
 
 // newListenerFromFd creates a new listener using the provided file descriptor.
 func newListenerFromFd(fd uintptr, addr string, tlsConfig *tls.Config) (*listener, error) {
-	li, err := net.FileListener(os.NewFile(fd, "tcp:"+addr+"->"))
+	file := os.NewFile(fd, "tcp:"+addr+"->")
+	li, err := net.FileListener(file)
 	if err != nil {
+		file.Close()
 		return nil, err
 	}
 	l := &listener{
 		Listener:  li.(*net.TCPListener),
+		file:      file,
 		tlsConfig: tlsConfig,
-		unblock:   make(chan int),
-		signal:    make(chan int, 1),
+		shutdown:  make(chan interface{}),
+		state:     stateActive,
 	}
-	activeListeners.watch(l)
+	managedListeners.manage(l)
 
 	return l, nil
 }
 
 // Accept implements the Accept() method of the net.Listener interface.
 func (l *listener) Accept() (c net.Conn, err error) {
-	// Check for signals.
 	select {
-	case sig := <-l.signal:
-		switch sig {
-		case signalShutdown:
-			l.close()
-			return nil, errShutdownRequested
-		}
+	case <-l.shutdown:
+		l.Close()
+		return nil, errShutdownRequested
 	default:
 	}
 
 	c, err = l.Listener.Accept()
+	if err != nil {
+		return
+	}
+	c = tls.Server(c, l.tlsConfig)
 	return
 }
 
-// close closes the listener.
-func (l *listener) close() {
-	l.Close()
-	activeListeners.unwatch(l)
+// Close implements the Close() method of the net.Listener interface.
+func (l *listener) Close() error {
+	var err error
+
+	err = l.Listener.Close()
+	if err == nil {
+		err = l.file.Close()
+	} else {
+		l.file.Close()
+	}
+	managedListeners.unmanage(l)
+
+	return err
 }
 
 // serve handles serving connections, and cleaning up listeners that fail.
 func (l *listener) serve() {
-	defer l.close()
-
+	defer l.Close()
 	go l.unblockAccept()
-	tlsListener := tls.NewListener(l, l.tlsConfig)
-	if err := http.Serve(tlsListener, ServeMux); err != nil {
+
+	if err := http.Serve(l, ServeMux); err != nil {
 		if _, requested := err.(*shutdownRequestedError); !requested {
-			// FIXME: Either implement restarting of listeners that failed, or
-			// do some better error handling.
+			// FIXME: Do something useful here.  Just panicing isn't even
+			// remotely useful.
 			panic(fmt.Errorf("Failed to serve connection: %v", err))
 		}
 	}
 }
 
-// unblockAccept will, upon receiving a signal, connect to the listener then
+// unblockAccept will, upon shutdown, connect to the listener and then
 // immediately disconnect from it, in order to unblock Accept().
 // FIXME: This is a hack.  It works, but there has to be a better way.
 func (l *listener) unblockAccept() {
-	for {
-		sig := <-l.unblock
-		if c, err := tls.Dial("tcp", l.Addr().String(), l.tlsConfig); err == nil {
-			c.Close()
-		}
-		if sig == signalShutdown {
-			return
-		}
+	<-l.shutdown
+	l.tlsConfig.InsecureSkipVerify = true
+	if c, err := tls.Dial("tcp", l.Addr().String(), l.tlsConfig); err == nil {
+		c.Close()
 	}
+	l.tlsConfig.InsecureSkipVerify = false
 }
 
-// listeners is a container that keeps track of listener.
+// listeners is the container used by managedListeners.
 type listeners struct {
 	listeners []*listener
-	sync.RWMutex
+	sync.Mutex
 	sync.WaitGroup
 }
 
-// watch keeps track of the provided listener.
-func (l *listeners) watch(w *listener) {
+// manage starts managing the provided listener.
+func (l *listeners) manage(li *listener) {
 	l.Lock()
-	l.listeners = append(l.listeners, w)
+	l.listeners = append(l.listeners, li)
 	l.Add(1)
 	l.Unlock()
 }
 
-// unwatch stops keeping track of the provided listener.
-func (l *listeners) unwatch(w *listener) {
+// unmanage stops managing the provided listener.
+func (l *listeners) unmanage(li *listener) {
 	l.Lock()
-	for i, li := range l.listeners {
-		if li == w {
-			l.listeners[len(l.listeners)-1], l.listeners[i], l.listeners = nil, l.listeners[len(l.listeners)-1], l.listeners[:len(l.listeners)-1]
+	for i, ml := range l.listeners {
+		if ml == li {
+			l.listeners[len(l.listeners)-1], l.listeners[i], l.listeners =
+				nil, l.listeners[len(l.listeners)-1], l.listeners[:len(l.listeners)-1]
 			l.Done()
 			break
 		}
@@ -146,79 +163,71 @@ func (l *listeners) unwatch(w *listener) {
 	l.Unlock()
 }
 
-// shutdown closes the watched listeners.  If graceful is true, active
-// connections are allowed to finish.  Otherwise, listeners are closed without
-// regard to any active connections.
+// shutdown starts the shutdown process for all managed listeners.
 func (l *listeners) shutdown(graceful bool) {
 	l.Lock()
-	for i, li := range l.listeners {
-		li.signal <- signalShutdown
-		li.unblock <- signalShutdown
-		if !graceful {
-			li.Close()
-			l.listeners[i] = nil
-			l.Done()
+	for _, li := range l.listeners {
+		// Ignore listeners that are closing or detached.
+		if li.state&stateClosing != 0 {
+			continue
 		}
-	}
-	if !graceful {
-		l.listeners = nil
+
+		li.state |= stateClosing
+		close(li.shutdown)
 	}
 	l.Unlock()
 	if graceful {
 		l.Wait()
 	}
+
+	// FIXME: Somewhat rarely, connections aren't gracefully shut down.  In
+	// curl, this manifests as error 52 ("Empty reply from server").  One way
+	// to work around this is to add a minor delay here.  A proper fix should
+	// be investigated and implemented instead.
+	time.Sleep(100 * time.Millisecond)
 }
 
-// detach closes all active listeners, while keeping the underlying file
-// descriptor open so that the listener can be recreated later.
-// FIXME: This could use some better error handling.
-func (l *listeners) detach() (DetachedListeners, error) {
-	l.RLock()
-	defer l.RUnlock()
-
+// detach returns information about listeners which can be used to recreate the
+// listener.
+func (l *listeners) detach() DetachedListeners {
+	l.Lock()
 	detachedListeners := make(DetachedListeners)
 	for _, li := range l.listeners {
-		// Get the listener's underlying file.
-		file, err := li.Listener.(*net.TCPListener).File()
-		if err != nil {
-			return nil, err
+		// Ignore listeners that are closing or detached.
+		if li.state&stateClosing != 0 || li.state&stateDetached != 0 {
+			continue
 		}
 
-		// Get the file descriptor of the file.
-		fd, err := syscall.Dup(int(file.Fd()))
-		if err != nil {
-			return nil, err
+		detachedListeners[li.Addr().String()] = &detachedListener{
+			Fd:               li.file.Fd(),
+			SessionTicketKey: li.tlsConfig.SessionTicketKey,
 		}
-
-		detachedListeners[li.Addr().String()] = detachedListener{
-			Fd:               uintptr(fd),
-			sessionTicketKey: li.tlsConfig.SessionTicketKey,
-		}
-		li.signal <- signalShutdown
-		li.unblock <- signalShutdown
+		li.state |= stateDetached
 	}
+	l.Unlock()
 
-	return detachedListeners, nil
+	return detachedListeners
 }
 
-// activeListeners is a collection of the currently active listeners.
-var activeListeners = &listeners{}
+// managedListeners is used to manage the active listeners.
+var managedListeners = &listeners{}
 
-// detachedListener holds the information needed to detach and then recreate
-// a listener.
+// detachedListener contains the information needed to recreate a listener.
 type detachedListener struct {
 	Fd               uintptr
-	sessionTicketKey [32]byte
+	SessionTicketKey [32]byte
 }
 
 // DetachedListeners is an address => detachedListener mapping.
-type DetachedListeners map[string]detachedListener
+type DetachedListeners map[string]*detachedListener
 
-// shutdownRequested is an error type used to indicate that the shutdown of a
-// listener was requested.
-type shutdownRequestedError struct {
-	error
-}
+// shutdownRequestedError is an implementation of the error interface.  It is
+// used to indicate that the shutdown of a listener was requested.
+type shutdownRequestedError struct{}
 
-// errShutdownRequested is an instance of shutdownRequestedError.
-var errShutdownRequested = &shutdownRequestedError{errors.New("shutdown requested")}
+// Error implements the Error() method of the error interface.
+func (e *shutdownRequestedError) Error() string { return "shutdown requested" }
+
+// errShutdownRequested is the error returned by Accept when it is responding
+// to a requested shutdown.
+var errShutdownRequested = &shutdownRequestedError{}

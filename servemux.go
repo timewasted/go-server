@@ -8,8 +8,7 @@ import (
 	"net/http"
 )
 
-// serveMux is an implementation of the http.ServeMux interface that supports
-// graceful shutdowns.
+// serveMux is an implementation of the http.ServeMux interface.
 type serveMux struct {
 	*http.ServeMux
 }
@@ -19,7 +18,8 @@ var ServeMux = &serveMux{http.NewServeMux()}
 
 // ServeHTTP implements the ServeHTTP() method of the http.ServeMux interface.
 func (mux *serveMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer activeListeners.Done()
-	activeListeners.Add(1)
+	managedListeners.Add(1)
+	defer managedListeners.Done()
+
 	mux.ServeMux.ServeHTTP(w, r)
 }

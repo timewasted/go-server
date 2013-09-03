@@ -60,15 +60,16 @@ func TestBasicOperation(t *testing.T) {
 	}
 
 	// Each listener should have a unique TLS session ticket key.
-	if activeListeners.listeners[0].tlsConfig.SessionTicketKey == activeListeners.listeners[1].tlsConfig.SessionTicketKey {
+	if managedListeners.listeners[0].tlsConfig.SessionTicketKey ==
+		managedListeners.listeners[1].tlsConfig.SessionTicketKey {
 		t.Error("Expected session ticket keys to not match.")
 	}
 
 	Shutdown()
 
 	// There should be not active listeners after shutting down.
-	if len(activeListeners.listeners) != 0 {
-		t.Errorf("Expected no active listeners, received '%v'.", len(activeListeners.listeners))
+	if len(managedListeners.listeners) != 0 {
+		t.Errorf("Expected no active listeners, received '%v'.", len(managedListeners.listeners))
 	}
 
 	// Requests to a non-running server should fail.
@@ -99,14 +100,11 @@ func TestReuseListeners(t *testing.T) {
 
 	// Store the current TLS session ticket keys.
 	tlsSessionTicketKeys := make(map[string][32]byte)
-	for _, li := range activeListeners.listeners {
+	for _, li := range managedListeners.listeners {
 		tlsSessionTicketKeys[li.Addr().String()] = li.tlsConfig.SessionTicketKey
 	}
 
-	existingListeners, err := Detach()
-	if err != nil {
-		t.Fatalf("Expected no error detaching listeners, received '%v'.", err)
-	}
+	existingListeners := Detach()
 
 	// The server should reuse the existing listeners.
 	if err := HTTPS(addrs, serverName, certFile, keyFile, existingListeners); err != nil {
@@ -121,7 +119,7 @@ func TestReuseListeners(t *testing.T) {
 	}
 
 	// Verify that the TLS session ticket keys haven't changed.
-	for _, li := range activeListeners.listeners {
+	for _, li := range managedListeners.listeners {
 		expectedKey, exists := tlsSessionTicketKeys[li.Addr().String()]
 		if !exists {
 			t.Errorf("Expected a session ticket key for %v to exist.", li.Addr().String())

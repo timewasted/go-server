@@ -27,10 +27,10 @@ const (
 )
 
 // HTTPS creates a server that will serve HTTP requests using TLS.  If
-// existingListeners (via Detach) is provided and matches an address in addrs,
-// an attempt will be made to reuse the listener.  If that fails, it will fall
-// back to creating a new listener.
-func HTTPS(addrs []string, serverName string, certFile string, keyFile string, existingListeners DetachedListeners) error {
+// reuseListeners (obtained via Detach) is provided and matches an address in
+// addrs, an attempt will be made to reuse the listener.  If that fails, it
+// will fall back to creating a new listener.
+func HTTPS(addrs []string, serverName string, certFile string, keyFile string, reuseListeners DetachedListeners) error {
 	var err error
 
 	// Load the server's certificate.
@@ -60,14 +60,14 @@ func HTTPS(addrs []string, serverName string, certFile string, keyFile string, e
 		}
 
 		var li *listener
-		// Attempt to reuse an existing listener.
-		if dl, exists := existingListeners[addr]; exists {
-			tlsConfig.SessionTicketKey = dl.sessionTicketKey
-			li, err = newListenerFromFd(dl.Fd, addr, tlsConfig)
+		// Attempt to reuse one of the provided listeners.
+		if reuse, exists := reuseListeners[addr]; exists {
+			tlsConfig.SessionTicketKey = reuse.SessionTicketKey
+			li, err = newListenerFromFd(reuse.Fd, addr, tlsConfig)
 			if err != nil {
 				// Failed to reuse the listener, so do some cleanup.
 				tlsConfig.SessionTicketKey = [32]byte{}
-				syscall.Close(int(dl.Fd))
+				syscall.Close(int(reuse.Fd))
 			}
 		}
 
@@ -91,23 +91,18 @@ func HTTPS(addrs []string, serverName string, certFile string, keyFile string, e
 // Shutdown gracefully shuts down the server, allowing any currently active
 // connections to finish before doing so.
 func Shutdown() {
-	activeListeners.shutdown(true)
+	managedListeners.shutdown(true)
 }
 
 // ForceShutdown forcefully closes all currently active connections.  Little
 // care is shown in making sure things are cleaned up, so this should generally
 // only be used as a last resort.
 func ForceShutdown() {
-	activeListeners.shutdown(false)
+	managedListeners.shutdown(false)
 }
 
-// Detach closes all currently active listeners, while keeping the underlying
-// file descriptor open, and returns all information needed to recreate the
-// listener.  The return value can be passed back to HTTPS in order to recreate
-// the listeners.
-//
-// Note that detached listeners are not handled by (Force)Shutdown, so they
-// either need to be handled manually, or by recreating them via HTTPS.
-func Detach() (DetachedListeners, error) {
-	return activeListeners.detach()
+// Detach returns information about all currently active listeners.  This
+// information can be passed back to HTTPS in order to recreate the listeners.
+func Detach() DetachedListeners {
+	return managedListeners.detach()
 }

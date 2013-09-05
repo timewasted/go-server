@@ -132,6 +132,10 @@ func TestReuseListeners(t *testing.T) {
 func makeRequest(addr string, route string, expectSuccess bool) error {
 	url := "https://" + addr + route
 	resp, err := httpClient.Get(url)
+	if err == nil {
+		resp.Body.Close()
+	}
+
 	if expectSuccess {
 		if err != nil {
 			return fmt.Errorf("Expected no error connecting to %v, received '%v'.", url, err)

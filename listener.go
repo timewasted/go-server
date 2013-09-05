@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -24,9 +25,7 @@ const (
 // listener is an implementation of the net.Listener interface.
 type listener struct {
 	net.Listener
-	file      *os.File
 	tlsConfig *tls.Config
-	shutdown  chan interface{}
 	state     uint16
 }
 
@@ -36,16 +35,9 @@ func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := li.(*net.TCPListener).File()
-	if err != nil {
-		li.Close()
-		return nil, err
-	}
 	l := &listener{
 		Listener:  li,
-		file:      file,
 		tlsConfig: tlsConfig,
-		shutdown:  make(chan interface{}),
 		state:     stateActive,
 	}
 	managedListeners.manage(l)
@@ -55,17 +47,13 @@ func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
 
 // newListenerFromFd creates a new listener using the provided file descriptor.
 func newListenerFromFd(fd uintptr, addr string, tlsConfig *tls.Config) (*listener, error) {
-	file := os.NewFile(fd, "tcp:"+addr+"->")
-	li, err := net.FileListener(file)
+	li, err := net.FileListener(os.NewFile(fd, "tcp:"+addr+"->"))
 	if err != nil {
-		file.Close()
 		return nil, err
 	}
 	l := &listener{
 		Listener:  li.(*net.TCPListener),
-		file:      file,
 		tlsConfig: tlsConfig,
-		shutdown:  make(chan interface{}),
 		state:     stateActive,
 	}
 	managedListeners.manage(l)
@@ -75,15 +63,12 @@ func newListenerFromFd(fd uintptr, addr string, tlsConfig *tls.Config) (*listene
 
 // Accept implements the Accept() method of the net.Listener interface.
 func (l *listener) Accept() (c net.Conn, err error) {
-	select {
-	case <-l.shutdown:
-		l.Close()
-		return nil, errShutdownRequested
-	default:
-	}
-
 	c, err = l.Listener.Accept()
 	if err != nil {
+		// FIXME: I'm not sure this is safe to check concurrently.
+		if l.state&stateClosing != 0 {
+			err = errShutdownRequested
+		}
 		return
 	}
 	c = tls.Server(c, l.tlsConfig)
@@ -92,24 +77,15 @@ func (l *listener) Accept() (c net.Conn, err error) {
 
 // Close implements the Close() method of the net.Listener interface.
 func (l *listener) Close() error {
-	var err error
-
-	err = l.Listener.Close()
-	if err == nil {
-		err = l.file.Close()
-	} else {
-		l.file.Close()
-	}
-	managedListeners.unmanage(l)
-
+	err := l.Listener.Close()
+	// FIXME: I'm not fond of having to do this in a goroutine, but it's the
+	// least terrible option available.
+	go managedListeners.unmanage(l)
 	return err
 }
 
 // serve handles serving connections, and cleaning up listeners that fail.
 func (l *listener) serve() {
-	defer l.Close()
-	go l.unblockAccept()
-
 	if err := http.Serve(l, ServeMux); err != nil {
 		if _, requested := err.(*shutdownRequestedError); !requested {
 			// FIXME: Do something useful here.  Just panicing isn't even
@@ -119,22 +95,10 @@ func (l *listener) serve() {
 	}
 }
 
-// unblockAccept will, upon shutdown, connect to the listener and then
-// immediately disconnect from it, in order to unblock Accept().
-// FIXME: This is a hack.  It works, but there has to be a better way.
-func (l *listener) unblockAccept() {
-	<-l.shutdown
-	l.tlsConfig.InsecureSkipVerify = true
-	if c, err := tls.Dial("tcp", l.Addr().String(), l.tlsConfig); err == nil {
-		c.Close()
-	}
-	l.tlsConfig.InsecureSkipVerify = false
-}
-
 // listeners is the container used by managedListeners.
 type listeners struct {
 	listeners []*listener
-	sync.Mutex
+	sync.RWMutex
 	sync.WaitGroup
 }
 
@@ -165,7 +129,7 @@ func (l *listeners) unmanage(li *listener) {
 
 // shutdown starts the shutdown process for all managed listeners.
 func (l *listeners) shutdown(graceful bool) {
-	l.Lock()
+	l.RLock()
 	for _, li := range l.listeners {
 		// Ignore listeners that are closing or detached.
 		if li.state&stateClosing != 0 {
@@ -173,9 +137,9 @@ func (l *listeners) shutdown(graceful bool) {
 		}
 
 		li.state |= stateClosing
-		close(li.shutdown)
+		li.Close()
 	}
-	l.Unlock()
+	l.RUnlock()
 	if graceful {
 		l.Wait()
 	}
@@ -190,7 +154,7 @@ func (l *listeners) shutdown(graceful bool) {
 // detach returns information about listeners which can be used to recreate the
 // listener.
 func (l *listeners) detach() DetachedListeners {
-	l.Lock()
+	l.RLock()
 	detachedListeners := make(DetachedListeners)
 	for _, li := range l.listeners {
 		// Ignore listeners that are closing or detached.
@@ -198,13 +162,14 @@ func (l *listeners) detach() DetachedListeners {
 			continue
 		}
 
+		netFd := reflect.ValueOf(li.Listener).Elem().FieldByName("fd").Elem()
 		detachedListeners[li.Addr().String()] = &detachedListener{
-			Fd:               li.file.Fd(),
+			Fd:               uintptr(netFd.FieldByName("sysfd").Int()),
 			SessionTicketKey: li.tlsConfig.SessionTicketKey,
 		}
 		li.state |= stateDetached
 	}
-	l.Unlock()
+	l.RUnlock()
 
 	return detachedListeners
 }

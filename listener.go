@@ -131,7 +131,7 @@ func (l *listeners) unmanage(li *listener) {
 func (l *listeners) shutdown(graceful bool) {
 	l.RLock()
 	for _, li := range l.listeners {
-		// Ignore listeners that are closing or detached.
+		// Ignore listeners that are closing.
 		if li.state&stateClosing != 0 {
 			continue
 		}

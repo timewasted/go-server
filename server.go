@@ -30,23 +30,24 @@ const (
 // reuseListeners (obtained via Detach) is provided and matches an address in
 // addrs, an attempt will be made to reuse the listener.  If that fails, it
 // will fall back to creating a new listener.
-func HTTPS(addrs []string, serverName string, certFile string, keyFile string, reuseListeners DetachedListeners) error {
-	var err error
-
-	// Load the server's certificate.
-	tlsCertificates := make([]tls.Certificate, 1)
-	tlsCertificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return err
+func HTTPS(addrs []string, keyPairs map[string]string, reuseListeners DetachedListeners) error {
+	// Load the server's certificates.
+	tlsCertificates := make([]tls.Certificate, 0, len(keyPairs))
+	for certFile, keyFile := range keyPairs {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return err
+		}
+		tlsCertificates = append(tlsCertificates, cert)
 	}
 
+	var err error
 	for _, addr := range addrs {
 		// Configure TLS for each individual address to avoid all addresses
 		// sharing the same SessionTicketKey.
 		tlsConfig := &tls.Config{
 			Certificates: tlsCertificates,
 			NextProtos:   []string{"http/1.1"},
-			ServerName:   serverName,
 			CipherSuites: []uint16{
 				TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
@@ -58,6 +59,7 @@ func HTTPS(addrs []string, serverName string, certFile string, keyFile string, r
 			PreferServerCipherSuites: true,  // Prefer our strong ciphers
 			SessionTicketsDisabled:   false, // Support session resumption
 		}
+		tlsConfig.BuildNameToCertificate()
 
 		var li *listener
 		// Attempt to reuse one of the provided listeners.

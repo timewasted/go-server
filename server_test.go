@@ -18,9 +18,10 @@ var (
 		"127.0.0.1:44380",
 		"127.0.0.1:44381",
 	}
-	serverName = "localhost"
-	certFile   = "./test/snakeoil_test.crt"
-	keyFile    = "./test/snakeoil_test.key"
+	keyPairs = map[string]string{
+		"./test/srv1.localhost.crt": "./test/srv1.localhost.key",
+		"./test/srv2.localhost.crt": "./test/srv2.localhost.key",
+	}
 )
 
 // Client configuration.
@@ -47,7 +48,7 @@ func init() {
 }
 
 func TestBasicOperation(t *testing.T) {
-	if err := HTTPS(addrs, serverName, certFile, keyFile, nil); err != nil {
+	if err := HTTPS(addrs, keyPairs, nil); err != nil {
 		t.Fatalf("Expected no error starting server, received '%v'.", err)
 	}
 	defer Shutdown()
@@ -86,7 +87,7 @@ func TestGracefulShutdown(t *testing.T) {
 }
 
 func TestReuseListeners(t *testing.T) {
-	if err := HTTPS(addrs, serverName, certFile, keyFile, nil); err != nil {
+	if err := HTTPS(addrs, keyPairs, nil); err != nil {
 		t.Fatalf("Expected no error starting server, received '%v'.", err)
 	}
 	defer Shutdown()
@@ -107,7 +108,7 @@ func TestReuseListeners(t *testing.T) {
 	existingListeners := Detach()
 
 	// The server should reuse the existing listeners.
-	if err := HTTPS(addrs, serverName, certFile, keyFile, existingListeners); err != nil {
+	if err := HTTPS(addrs, keyPairs, existingListeners); err != nil {
 		t.Fatalf("Expected no error starting server, received '%v'.", err)
 	}
 

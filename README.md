@@ -9,7 +9,24 @@ An easy to use HTTPS server written in Go.  It uses the standard library, and pr
 Usage is simple:
 
 ```
-if err := server.HTTPS("127.0.0.1:443", "localhost", "./cert.file", "./key.file", nil); if err != nil {
+import (
+	"github.com/timewasted/go-server"
+	...
+)
+
+// Listen on localhost on ports 443 and 44380
+addrs := []string{
+	"127.0.0.1:443",
+	"127.0.0.1:44380",
+}
+
+// The above addresses are serving server1.example.com and server2.example.com
+keyPairs := map[string]string{
+	"server1.example.com.crt": "server1.example.com.key",
+	"server2.example.com.crt": "server2.example.com.key",
+}
+
+if err := server.HTTPS(addrs, keyPairs, nil); if err != nil {
 	log.Fatal("Error starting server:", err)
 }
 // Do stuff

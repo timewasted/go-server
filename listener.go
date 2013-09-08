@@ -173,8 +173,8 @@ func (l *listeners) detach() DetachedListeners {
 	l.RLock()
 	detachedListeners := make(DetachedListeners)
 	for _, li := range l.listeners {
-		// Ignore listeners that are closing or detached.
-		if li.state&stateClosing != 0 || li.state&stateDetached != 0 {
+		// Ignore listeners that are closing.
+		if li.state&stateClosing != 0 {
 			continue
 		}
 

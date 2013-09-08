@@ -68,6 +68,7 @@ func TestBasicOperation(t *testing.T) {
 		t.Fatalf("Expected no error when starting server, received '%v'.", err)
 	}
 	defer Shutdown()
+	Serve()
 
 	// Ensure that the server is accepting connections.
 	for addr, serverName := range addrToServerName {
@@ -112,6 +113,7 @@ func TestReuseListeners(t *testing.T) {
 		t.Fatalf("Expected no error when starting server, received '%v'.", err)
 	}
 	defer Shutdown()
+	Serve()
 
 	// Ensure that the server is accepting connections.
 	for addr, serverName := range addrToServerName {
@@ -132,6 +134,7 @@ func TestReuseListeners(t *testing.T) {
 	if err := HTTPS(addrs, keyPairs, existingListeners); err != nil {
 		t.Fatalf("Expected no error when restarting server, received '%v'.", err)
 	}
+	Serve()
 
 	// Ensure that the server is still accepting connections.
 	for addr, serverName := range addrToServerName {

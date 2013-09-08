@@ -14,22 +14,27 @@ import (
 	...
 )
 
-// Listen on localhost on ports 443 and 44380
+// Listen on localhost on ports 443 and 44380.
 addrs := []string{
 	"127.0.0.1:443",
 	"127.0.0.1:44380",
 }
 
-// The above addresses are serving server1.example.com and server2.example.com
+// The above addresses are serving server1.example.com and server2.example.com.
 keyPairs := map[string]string{
 	"server1.example.com.crt": "server1.example.com.key",
 	"server2.example.com.crt": "server2.example.com.key",
 }
 
+// Create the server.
 if err := server.HTTPS(addrs, keyPairs, nil); if err != nil {
 	log.Fatal("Error starting server:", err)
 }
-// Do stuff
+
+// Serve connections.
+server.Serve()
+
+// When done serving, shutdown.
 server.Shutdown()
 ```
 

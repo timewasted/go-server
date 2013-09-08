@@ -83,11 +83,14 @@ func HTTPS(addrs []string, keyPairs map[string]string, reuseListeners DetachedLi
 			// FIXME: We should probably continue iterating through the addresses.
 			return err
 		}
-
-		go li.serve()
 	}
 
 	return err
+}
+
+// Serve begins serving connections.
+func Serve() {
+	managedListeners.serve()
 }
 
 // Shutdown gracefully shuts down the server, allowing any currently active

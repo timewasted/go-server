@@ -18,6 +18,7 @@ import (
 // States that a listener can be in.
 const (
 	stateActive   uint16 = iota
+	stateServing  uint16 = 1 << iota
 	stateClosing  uint16 = 1 << iota
 	stateDetached uint16 = 1 << iota
 )
@@ -125,6 +126,21 @@ func (l *listeners) unmanage(li *listener) {
 		l.listeners = nil
 	}
 	l.Unlock()
+}
+
+// serve begins serving connections.
+func (l *listeners) serve() {
+	l.RLock()
+	for _, li := range l.listeners {
+		// Ignore listeners that are closing or already serving.
+		if li.state&stateClosing != 0 || li.state&stateServing != 0 {
+			continue
+		}
+
+		li.state |= stateServing
+		go li.serve()
+	}
+	l.RUnlock()
 }
 
 // shutdown starts the shutdown process for all managed listeners.

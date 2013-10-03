@@ -13,17 +13,26 @@ import (
 	"syscall"
 )
 
-// A list of the possible cipher suite ids that are not already defined
-// by the crypto/tls package. Taken from
+// A list of strong cipher suite IDs that are not defined by the crypto/tls
+// package in the current stable version of Go. Values taken from
 // http://www.iana.org/assignments/tls-parameters/tls-parameters.xml
 //
 // Note that the reason they are not defined by the crypto/tls package is
-// because they are only usable in TLS 1.2, which is not yet supported by Go.
+// because they are not (yet?) supported by Go. Defining them here allows us
+// to immediately start using them, should Go support them in the future.
 const (
-	TLS_RSA_WITH_AES_128_GCM_SHA256       uint16 = 0x009c
-	TLS_RSA_WITH_AES_256_GCM_SHA384       uint16 = 0x009d
-	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 uint16 = 0xc02f
-	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 uint16 = 0xc030
+	TLS_DHE_RSA_WITH_AES_128_CBC_SHA        uint16 = 0x0033
+	TLS_DHE_RSA_WITH_AES_256_CBC_SHA        uint16 = 0x0039
+	TLS_RSA_WITH_AES_128_GCM_SHA256         uint16 = 0x009c
+	TLS_RSA_WITH_AES_256_GCM_SHA384         uint16 = 0x009d
+	TLS_DHE_RSA_WITH_AES_128_GCM_SHA256     uint16 = 0x009e
+	TLS_DHE_RSA_WITH_AES_256_GCM_SHA384     uint16 = 0x009f
+	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA    uint16 = 0xc009
+	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA    uint16 = 0xc00a
+	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 uint16 = 0xc02b
+	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 uint16 = 0xc02c
+	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256   uint16 = 0xc02f
+	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384   uint16 = 0xc030
 )
 
 // HTTPS creates a server that will serve HTTP requests using TLS.  If
@@ -48,12 +57,43 @@ func HTTPS(addrs []string, keyPairs map[string]string, reuseListeners DetachedLi
 		tlsConfig := &tls.Config{
 			Certificates: tlsCertificates,
 			NextProtos:   []string{"http/1.1"},
+			// Reasoning behind the cipher suite ordering:
+			//
+			// - We want forward secrecy, so ECDHE/DHE come first. ECDHE comes
+			//   before DHE since it's both stronger and faster.
+			// - We prefer ECDSA over RSA since it's both stronger and faster.
+			// - AES-GCM is currently our best choice of ciphers, since it is
+			//   not vulnerable to any known attacks.
+			// - Between CBC-mode ciphers and RC4, I'm not sure which is the
+			//   lesser evil. CBC is vulnerable to BEAST (which is mostly
+			//   mitigated by modern clients: https://community.qualys.com/blogs/securitylabs/2013/09/10/is-beast-still-a-threat)
+			//   and Lucky13 (which is unlikely to be mitigated in Go: https://groups.google.com/d/msg/golang-nuts/HF5O5vAKRcQ/3cYWryRyZboJ),
+			//   while RC4 has its own set of issues which lead to questionable
+			//   security. For now, I'm opting to prefer RC4 just because that
+			//   seems to be the consensus among the internet giants that
+			//   employ people who are undoubtedly much smarter than me about
+			//   this sort of thing.
 			CipherSuites: []uint16{
+				TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+				TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+
+				TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 				TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
 				tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+
+				TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
+				TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+				TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+				TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+
+				TLS_RSA_WITH_AES_256_GCM_SHA384,
 				TLS_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_RSA_WITH_RC4_128_SHA,
+				tls.TLS_RSA_WITH_AES_256_CBC_SHA,
 				tls.TLS_RSA_WITH_AES_128_CBC_SHA,
 			},
 			PreferServerCipherSuites: true,  // Prefer our strong ciphers

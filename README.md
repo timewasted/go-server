@@ -1,7 +1,7 @@
 go-server
 =========
 
-An easy to use HTTPS server written in Go.  It uses the standard library, and provides some benefits over using the standard library directly:
+An easy to use HTTP/HTTPS server written in Go.  It uses the standard library, and provides some benefits over using the standard library directly:
 
 * Can gracefully shut down active connections.
 * Can detach and reattach listeners, which allows for low (zero?) downtime restarts.
@@ -14,34 +14,42 @@ import (
 	...
 )
 
-// Listen on localhost on ports 443 and 44380.
-addrs := []string{
-	"127.0.0.1:443",
-	"127.0.0.1:44380",
+// Create a few listeners.
+httpServer := server.New()
+if err := httpServer.Listen("127.0.0.1:80"); err != nil {
+	log.Fatal("Listen error:", err)
 }
-
-// The above addresses are serving server1.example.com and server2.example.com.
-keyPairs := map[string]string{
-	"server1.example.com.crt": "server1.example.com.key",
-	"server2.example.com.crt": "server2.example.com.key",
+if err := httpServer.Listen("127.0.0.1:8080"); err != nil {
+	log.Fatal("Listen error:", err)
 }
+// Start serving connections.
+httpServer.Serve()
+// Shutdown the server.
+httpServer.Shutdown()
 
-// Create the server.
-if err := server.HTTPS(addrs, keyPairs, nil); if err != nil {
-	log.Fatal("Error starting server:", err)
+// Create a few listeners.
+httpsServer := server.New()
+if err := httpsServer.Listen("127.0.0.1:443"); err != nil {
+	log.Fatal("Listen error:", err)
 }
-
-// Serve connections.
-server.Serve()
-
-// When done serving, shutdown.
-server.Shutdown()
+if err := httpsServer.Listen("127.0.0.1:44380"); err != nil {
+	log.Fatal("Listen error:", err)
+}
+// Enable TLS
+if err := httpsServer.AddTLSCertificateFromFile("/path/to/server.cert", "/path/to/server.key"); err != nil {
+	log.Fatal("TLS error:", err)
+}
+// Start serving connections.
+httpsServer.Serve()
+// Shutdown the server.
+httpsServer.Shutdown()
 ```
 
 Current limitations:
 --------------------
 
-* Only supports HTTPS, and not plain HTTP.  I am not strictly against adding support for plain HTTP, but I generally feel that plain HTTP is not a valid option these days, so it's pretty low on my list of priorities.
+* It is only possible to enable TLS on listeners that are detached or not currently serving connections.
+* Once TLS has been enabled, it is only possible to disable it by detaching and reattaching listeners.
 
 License:
 --------

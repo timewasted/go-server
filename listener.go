@@ -17,77 +17,78 @@ import (
 
 // States that a listener can be in.
 const (
-	stateActive   uint16 = iota
-	stateServing  uint16 = 1 << iota
-	stateClosing  uint16 = 1 << iota
-	stateDetached uint16 = 1 << iota
+	stateListening uint16 = iota
+	stateServing   uint16 = 1 << iota
+	stateClosing   uint16 = 1 << iota
+	stateDetached  uint16 = 1 << iota
 )
 
 // listener is an implementation of the net.Listener interface.
 type listener struct {
 	net.Listener
-	tlsConfig *tls.Config
-	state     uint16
+	manager              *listeners
+	stateMutex, tlsMutex sync.RWMutex
+	state                uint16
+	tlsConfig            *tls.Config
 }
 
-// newListener creates a new listener.
-func newListener(addr string, tlsConfig *tls.Config) (*listener, error) {
-	li, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	l := &listener{
-		Listener:  li,
-		tlsConfig: tlsConfig,
-		state:     stateActive,
-	}
-	managedListeners.manage(l)
+// hasState returns true if the listener has any of the states provided.  This
+// is an OR check, not an AND check.
+func (l *listener) hasState(states ...uint16) bool {
+	l.stateMutex.RLock()
+	defer l.stateMutex.RUnlock()
 
-	return l, nil
+	for _, state := range states {
+		if state == stateListening || l.state&state != 0 {
+			return true
+		}
+	}
+	return false
 }
 
-// newListenerFromFd creates a new listener using the provided file descriptor.
-func newListenerFromFd(fd uintptr, addr string, tlsConfig *tls.Config) (*listener, error) {
-	li, err := net.FileListener(os.NewFile(fd, "tcp:"+addr+"->"))
-	if err != nil {
-		return nil, err
+// configureTLS sets the TLS configuration for the listener.
+func (l *listener) configureTLS(config *tls.Config) {
+	l.tlsMutex.Lock()
+	if config == nil {
+		config = &tls.Config{}
+	} else {
+		*l.tlsConfig = *config
 	}
-	l := &listener{
-		Listener:  li.(*net.TCPListener),
-		tlsConfig: tlsConfig,
-		state:     stateActive,
-	}
-	managedListeners.manage(l)
+	l.tlsMutex.Unlock()
+}
 
-	return l, nil
+// tlsConfigured returns true if TLS has been configured for the listener.
+func (l *listener) tlsConfigured() bool {
+	l.tlsMutex.RLock()
+	defer l.tlsMutex.RUnlock()
+	return len(l.tlsConfig.Certificates) > 0
 }
 
 // Accept implements the Accept() method of the net.Listener interface.
 func (l *listener) Accept() (c net.Conn, err error) {
 	c, err = l.Listener.Accept()
 	if err != nil {
-		// FIXME: I'm not sure this is safe to check concurrently.
-		if l.state&stateClosing != 0 {
+		if l.hasState(stateClosing) {
 			err = errShutdownRequested
 		}
 		return
 	}
-	c = tls.Server(c, l.tlsConfig)
+	if l.tlsConfigured() {
+		c = tls.Server(c, l.tlsConfig)
+	}
 	return
 }
 
 // Close implements the Close() method of the net.Listener interface.
 func (l *listener) Close() error {
 	err := l.Listener.Close()
-	// FIXME: I'm not fond of having to do this in a goroutine, but it's the
-	// least terrible option available.
-	go managedListeners.unmanage(l)
+	go l.manager.unmanage(l)
 	return err
 }
 
-// serve handles serving connections, and cleaning up listeners that fail.
-func (l *listener) serve() {
-	if err := http.Serve(l, ServeMux); err != nil {
+// serve begins serving connections.
+func (l *listener) serve(server *Server) {
+	if err := http.Serve(l, server); err != nil {
 		if _, requested := err.(*shutdownRequestedError); !requested {
 			// FIXME: Do something useful here.  Just panicing isn't even
 			// remotely useful.
@@ -96,26 +97,70 @@ func (l *listener) serve() {
 	}
 }
 
-// listeners is the container used by managedListeners.
+// listeners is a collection of managed listeners.
 type listeners struct {
-	listeners []*listener
 	sync.RWMutex
 	sync.WaitGroup
+	listeners []*listener
 }
 
-// manage starts managing the provided listener.
-func (l *listeners) manage(li *listener) {
+// new creates a new listener.
+func (l *listeners) new(addr string) error {
+	newListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	l.manage(newListener)
+	return nil
+}
+
+// reuse creates a new listener using the provided file descriptor.
+func (l *listeners) reuse(fd uintptr, addr string) error {
+	newListener, err := net.FileListener(os.NewFile(fd, "tcp:"+addr+"->"))
+	if err != nil {
+		return err
+	}
+
+	var reused bool
 	l.Lock()
-	l.listeners = append(l.listeners, li)
+	for i, li := range l.listeners {
+		if li.Addr().String() == addr {
+			l.listeners[i] = &listener{
+				Listener:  newListener,
+				manager:   l,
+				state:     stateListening,
+				tlsConfig: &tls.Config{},
+			}
+			reused = true
+		}
+	}
+	l.Unlock()
+
+	if !reused {
+		l.manage(newListener.(*net.TCPListener))
+	}
+	return nil
+}
+
+// manage keeps track of the provided listener.
+func (l *listeners) manage(li net.Listener) {
+	l.Lock()
+	l.listeners = append(l.listeners, &listener{
+		Listener:  li,
+		manager:   l,
+		state:     stateListening,
+		tlsConfig: &tls.Config{},
+	})
 	l.Add(1)
 	l.Unlock()
 }
 
-// unmanage stops managing the provided listener.
-func (l *listeners) unmanage(li *listener) {
+// unmanage stops keeping track of the provided listener.
+func (l *listeners) unmanage(listener *listener) {
 	l.Lock()
-	for i, ml := range l.listeners {
-		if ml == li {
+	for i, li := range l.listeners {
+		if li == listener {
 			l.listeners[len(l.listeners)-1], l.listeners[i], l.listeners =
 				nil, l.listeners[len(l.listeners)-1], l.listeners[:len(l.listeners)-1]
 			l.Done()
@@ -128,32 +173,50 @@ func (l *listeners) unmanage(li *listener) {
 	l.Unlock()
 }
 
-// serve begins serving connections.
-func (l *listeners) serve() {
+// configureTLS sets the TLS configuration for each listener that is not
+// serving connections or closing.
+func (l *listeners) configureTLS(config *tls.Config) {
 	l.RLock()
-	for _, li := range l.listeners {
-		// Ignore listeners that are closing or already serving.
-		if li.state&stateClosing != 0 || li.state&stateServing != 0 {
-			continue
+	for _, listener := range l.listeners {
+		// Ignore listeners that are serving or closing.
+		listener.stateMutex.RLock()
+		if listener.state&(stateServing|stateClosing) == 0 {
+			listener.configureTLS(config)
 		}
-
-		li.state |= stateServing
-		go li.serve()
+		listener.stateMutex.RUnlock()
 	}
 	l.RUnlock()
 }
 
-// shutdown starts the shutdown process for all managed listeners.
+// serve begins serving connections for each listener that is not already
+// serving connections or closing.
+func (l *listeners) serve(server *Server) {
+	l.RLock()
+	for _, listener := range l.listeners {
+		// Ignore listeners that are serving or closing.
+		listener.stateMutex.Lock()
+		if listener.state&(stateServing|stateClosing) == 0 {
+			listener.state |= stateServing
+			go listener.serve(server)
+		}
+		listener.stateMutex.Unlock()
+	}
+	l.RUnlock()
+}
+
+// shutdown requests that each listener that is not already closing be shut
+// down.  Is graceful is true, this function blocks until all listeners have
+// been shut down.
 func (l *listeners) shutdown(graceful bool) {
 	l.RLock()
-	for _, li := range l.listeners {
+	for _, listener := range l.listeners {
 		// Ignore listeners that are closing.
-		if li.state&stateClosing != 0 {
-			continue
+		listener.stateMutex.Lock()
+		if listener.state&stateClosing == 0 {
+			listener.state |= stateClosing
+			listener.Close()
 		}
-
-		li.state |= stateClosing
-		li.Close()
+		listener.stateMutex.Unlock()
 	}
 	l.RUnlock()
 	if graceful {
@@ -167,40 +230,29 @@ func (l *listeners) shutdown(graceful bool) {
 	time.Sleep(100 * time.Millisecond)
 }
 
-// detach returns information about listeners which can be used to recreate the
-// listener.
+// detach returns an address to underlying file descriptor mapping for all
+// listeners that are not closing.
 func (l *listeners) detach() DetachedListeners {
 	l.RLock()
-	detachedListeners := make(DetachedListeners)
-	for _, li := range l.listeners {
+	listeners := make(DetachedListeners)
+	for _, listener := range l.listeners {
 		// Ignore listeners that are closing.
-		if li.state&stateClosing != 0 {
-			continue
+		listener.stateMutex.Lock()
+		if listener.state&stateClosing == 0 {
+			fd := reflect.ValueOf(listener.Listener).Elem().FieldByName("fd").Elem()
+			listeners[listener.Addr().String()] = uintptr(fd.FieldByName("sysfd").Int())
+			listener.state |= stateDetached
 		}
-
-		netFd := reflect.ValueOf(li.Listener).Elem().FieldByName("fd").Elem()
-		detachedListeners[li.Addr().String()] = &detachedListener{
-			Fd:               uintptr(netFd.FieldByName("sysfd").Int()),
-			SessionTicketKey: li.tlsConfig.SessionTicketKey,
-		}
-		li.state |= stateDetached
+		listener.stateMutex.Unlock()
 	}
 	l.RUnlock()
 
-	return detachedListeners
+	return listeners
 }
 
-// managedListeners is used to manage the active listeners.
-var managedListeners = &listeners{}
-
-// detachedListener contains the information needed to recreate a listener.
-type detachedListener struct {
-	Fd               uintptr
-	SessionTicketKey [32]byte
-}
-
-// DetachedListeners is an address => detachedListener mapping.
-type DetachedListeners map[string]*detachedListener
+// DetachedListeners is an address to file descriptor mapping of listeners that
+// have been detached.
+type DetachedListeners map[string]uintptr
 
 // shutdownRequestedError is an implementation of the error interface.  It is
 // used to indicate that the shutdown of a listener was requested.

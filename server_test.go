@@ -58,46 +58,114 @@ func init() {
 		panic("Failed to add CA cert to pool.")
 	}
 	httpTransport.TLSClientConfig.RootCAs = rootCAs
-
-	ServeMux.HandleFunc(simpleRoute, simpleHandler)
-	ServeMux.HandleFunc(longRunningRoute, longRunningHandler)
 }
 
-func TestBasicOperation(t *testing.T) {
-	if err := HTTPS(addrs, keyPairs, nil); err != nil {
-		t.Fatalf("Expected no error when starting server, received '%v'.", err)
+func testServer() *Server {
+	server := New()
+	server.ServeMux.HandleFunc(simpleRoute, simpleHandler)
+	server.ServeMux.HandleFunc(longRunningRoute, longRunningHandler)
+	return server
+}
+
+func TestServerHTTP(t *testing.T) {
+	var err error
+	server := testServer()
+	defer server.Shutdown()
+
+	for _, addr := range addrs {
+		if err = server.Listen(addr); err != nil {
+			t.Fatalf("Expected no error when listening, received '%v'.", err)
+		}
 	}
-	defer Shutdown()
-	Serve()
+	server.Serve()
+
+	// Ensure that the server is accepting HTTP connections.
+	for addr := range addrToServerName {
+		if err = httpRequestSuccess(addr, simpleRoute); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ensure that listeners can not enable TLS after serving connections.
+	for certFile, keyFile := range keyPairs {
+		if err = server.AddTLSCertificateFromFile(certFile, keyFile); err != nil {
+			t.Fatalf("Expected no error when adding TLS certificate, received '%v'.", err)
+		}
+	}
+	for _, listener := range server.listeners.listeners {
+		if listener.tlsConfigured() {
+			t.Fatal("Expected TLS to not be configured.")
+		}
+	}
+
+	server.Shutdown()
+
+	// Ensure that the server has no listeners.
+	if len(server.listeners.listeners) != 0 {
+		t.Errorf("Expected no managed listeners, received '%v'.", len(server.listeners.listeners))
+	}
+
+	// Ensure that the server is no longer accepting connections.
+	for addr := range addrToServerName {
+		if err = httpRequestFailure(addr, simpleRoute); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestServerHTTPS(t *testing.T) {
+	var err error
+	server := testServer()
+	defer server.Shutdown()
+
+	for _, addr := range addrs {
+		if err = server.Listen(addr); err != nil {
+			t.Fatalf("Expected no error when listening, received '%v'.", err)
+		}
+	}
+
+	for certFile, keyFile := range keyPairs {
+		if err = server.AddTLSCertificateFromFile(certFile, keyFile); err != nil {
+			t.Fatalf("Expected no error when adding TLS certificate, received '%v'.", err)
+		}
+	}
+	server.Serve()
 
 	// Ensure that the server is accepting connections.
 	for addr, serverName := range addrToServerName {
-		if err := requestSuccess(addr, serverName, simpleRoute); err != nil {
+		if err = httpsRequestSuccess(addr, serverName, simpleRoute); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Ensure that SNI is working.
-	if err := requestFailure(addrToServerName[addrs[0]], "invalid.example.com", simpleRoute); err != nil {
+	if err = httpsRequestFailure(addrToServerName[addrs[0]], "invalid.example.com", simpleRoute); err != nil {
 		t.Fatal(err)
 	}
 
 	// Ensure that each listener has a unique TLS session ticket key.
-	if managedListeners.listeners[0].tlsConfig.SessionTicketKey ==
-		managedListeners.listeners[1].tlsConfig.SessionTicketKey {
-		t.Error("Expected listeners to have unique TLS session ticket keys.")
+	if server.listeners.listeners[0].tlsConfig.SessionTicketKey ==
+		server.listeners.listeners[1].tlsConfig.SessionTicketKey {
+		t.Errorf("Expected listeners to have unique TLS session ticket keys.")
 	}
 
-	Shutdown()
+	// Ensure that listeners can not disable TLS after serving connections.
+	for _, listener := range server.listeners.listeners {
+		if !listener.tlsConfigured() {
+			t.Fatal("Expected TLS to be configured.")
+		}
+	}
 
-	// Ensure that there are no managed listeners after shutting down.
-	if len(managedListeners.listeners) != 0 {
-		t.Errorf("Expected no managed listeners, received '%v'.", len(managedListeners.listeners))
+	server.Shutdown()
+
+	// Ensure that the server has no listeners.
+	if len(server.listeners.listeners) != 0 {
+		t.Errorf("Expected no managed listeners, received '%v'.", len(server.listeners.listeners))
 	}
 
 	// Ensure that the server is no longer accepting connections.
 	for addr, serverName := range addrToServerName {
-		if err := requestFailure(addr, serverName, simpleRoute); err != nil {
+		if err = httpsRequestFailure(addr, serverName, simpleRoute); err != nil {
 			t.Error(err)
 		}
 	}
@@ -109,55 +177,84 @@ func TestGracefulShutdown(t *testing.T) {
 }
 
 func TestReuseListeners(t *testing.T) {
-	if err := HTTPS(addrs, keyPairs, nil); err != nil {
-		t.Fatalf("Expected no error when starting server, received '%v'.", err)
+	var err error
+	server := testServer()
+	defer server.Shutdown()
+
+	for _, addr := range addrs {
+		if err = server.Listen(addr); err != nil {
+			t.Fatalf("Expected no error when listening, received '%v'.", err)
+		}
 	}
-	defer Shutdown()
-	Serve()
+
+	for certFile, keyFile := range keyPairs {
+		if err = server.AddTLSCertificateFromFile(certFile, keyFile); err != nil {
+			t.Fatalf("Expected no error when adding TLS certificate, received '%v'.", err)
+		}
+	}
+	server.Serve()
 
 	// Ensure that the server is accepting connections.
 	for addr, serverName := range addrToServerName {
-		if err := requestSuccess(addr, serverName, simpleRoute); err != nil {
+		if err = httpsRequestSuccess(addr, serverName, simpleRoute); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Store the current TLS session ticket keys.
-	tlsSessionTicketKeys := make(map[string][32]byte)
-	for _, li := range managedListeners.listeners {
-		tlsSessionTicketKeys[li.Addr().String()] = li.tlsConfig.SessionTicketKey
+	sessionTicketKeys := make(map[string][32]byte)
+	for _, listener := range server.listeners.listeners {
+		sessionTicketKeys[listener.Addr().String()] = listener.tlsConfig.SessionTicketKey
 	}
 
-	existingListeners := Detach()
+	detachedListeners := server.Detach()
 
-	// The server should reuse the existing listeners.
-	if err := HTTPS(addrs, keyPairs, existingListeners); err != nil {
-		t.Fatalf("Expected no error when restarting server, received '%v'.", err)
+	// Ensure that the server has two listeners.
+	if len(server.listeners.listeners) != 2 {
+		t.Errorf("Expected two managed listeners, received '%v'.", len(server.listeners.listeners))
 	}
-	Serve()
 
-	// Ensure that the server is still accepting connections.
+	server.ReuseListeners(detachedListeners)
+	for _, addr := range addrs {
+		if err = server.Listen(addr); err != nil {
+			t.Fatalf("Expected no error when listening, received '%v'.", err)
+		}
+	}
+
+	for certFile, keyFile := range keyPairs {
+		if err = server.AddTLSCertificateFromFile(certFile, keyFile); err != nil {
+			t.Fatalf("Expected no error when adding TLS certificate, received '%v'.", err)
+		}
+	}
+	server.Serve()
+
+	// Ensure that the server is accepting connections.
 	for addr, serverName := range addrToServerName {
-		if err := requestSuccess(addr, serverName, simpleRoute); err != nil {
+		if err = httpsRequestSuccess(addr, serverName, simpleRoute); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Ensure that the TLS session ticket keys haven't changed.
-	for _, li := range managedListeners.listeners {
-		expectedKey, exists := tlsSessionTicketKeys[li.Addr().String()]
+	// Ensure that the TLS session ticket keys have been regenerated.
+	for _, listener := range server.listeners.listeners {
+		key, exists := sessionTicketKeys[listener.Addr().String()]
 		if !exists {
-			t.Errorf("Expected TLS session ticket key for %v to exist.", li.Addr().String())
-		} else if expectedKey != li.tlsConfig.SessionTicketKey {
-			t.Errorf("Expected TLS session ticket key for %v to not change.", li.Addr().String())
+			t.Errorf("Expected TLS session ticket key for %v to exist.", listener.Addr().String())
+		} else if key == listener.tlsConfig.SessionTicketKey {
+			t.Errorf("Expected TLS session ticket key for %v to be regenerated.", listener.Addr().String())
 		}
 	}
 }
 
 // request makes a request to the given server.
-func request(addr, serverName, route string, expectSuccess bool) error {
-	httpTransport.TLSClientConfig.ServerName = serverName
-	url := "https://" + addr + route
+func request(tls bool, addr, serverName, route string, expectSuccess bool) error {
+	var url string
+	if tls {
+		httpTransport.TLSClientConfig.ServerName = serverName
+		url = "https://" + addr + route
+	} else {
+		url = "http://" + addr + route
+	}
 	resp, err := httpClient.Get(url)
 	if err == nil {
 		resp.Body.Close()
@@ -179,14 +276,28 @@ func request(addr, serverName, route string, expectSuccess bool) error {
 	return nil
 }
 
-// requestSuccess makes a request to the given server, and expects it to succeed.
-func requestSuccess(addr, serverName, route string) error {
-	return request(addr, serverName, route, true)
+// httpRequestSuccess makes a plain HTTP request, which should succeed, to the
+// given server.
+func httpRequestSuccess(addr, route string) error {
+	return request(false, addr, "", route, true)
 }
 
-// requestFailure makes a request to the given server, and expects it to fail.
-func requestFailure(addr, serverName, route string) error {
-	return request(addr, serverName, route, false)
+// httpRequestSuccess makes a plain HTTP request, which should fail, to the
+// given server.
+func httpRequestFailure(addr, route string) error {
+	return request(false, addr, "", route, false)
+}
+
+// httpRequestSuccess makes a HTTPS request, which should succeed, to the given
+// server.
+func httpsRequestSuccess(addr, serverName, route string) error {
+	return request(true, addr, serverName, route, true)
+}
+
+// httpRequestSuccess makes a HTTPS request, which should fail, to the given
+// server.
+func httpsRequestFailure(addr, serverName, route string) error {
+	return request(true, addr, serverName, route, false)
 }
 
 func simpleHandler(w http.ResponseWriter, req *http.Request) {

@@ -1,6 +1,8 @@
 go-server
 =========
 
+### This should probably be considered depreciated in favor of [go-webserver](https://github.com/timewasted/go-webserver).
+
 An easy to use HTTP/HTTPS server written in Go.  It uses the standard library, and provides some benefits over using the standard library directly:
 
 * Can gracefully shut down active connections.
